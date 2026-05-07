@@ -251,11 +251,14 @@ export const AgentPage = () => {
     try {
       setIsUploading(true);
       const response = await uploadImage(file);
+      const newId = response.image.id;
+      // 清除新图片的旧对话记录，避免切换后加载到残留消息
+      clearConversation(newId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["images"] }),
         queryClient.invalidateQueries({ queryKey: ["agent-images"] }),
       ]);
-      setCurrentImageId(response.image.id);
+      setCurrentImageId(newId);
       message.success("图片上传成功，已切换到该图片上下文。");
     } catch (error) {
       message.error(extractErrorMessage(error));

@@ -59,6 +59,15 @@ VITE_LLM_API_KEY=your-api-key
 VITE_LLM_MODEL=mimo-v2.5
 ```
 
+## 关于后端
+
+本项目的矿物分类和鲕粒分割功能依赖后端服务（FastAPI + 深度学习模型），后端**暂未开源**。
+
+- **在线演示**：默认以 Mock 模式运行，LLM 对话、多模态图片理解等功能可直接体验，分类和分割结果为模拟数据。
+- **真实分析**：如需连接真实后端进行矿物分类与鲕粒分割，请联系作者获取后端部署方式。
+
+> 后端基于 PyTorch + SAM / 自训练分类器，支持图片上传、自动分类、鲕粒分割与结果持久化。如需后端，请通过 [GitHub Issues](https://github.com/NeverGpDzy/rock-thin-section-agent/issues) 联系我。
+
 ## Mock 模式
 
 默认开启（`VITE_USE_MOCK=true`），所有后端接口返回模拟数据，图片上传支持本地预览。
