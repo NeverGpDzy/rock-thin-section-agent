@@ -3,7 +3,7 @@ import {
   streamChatCompletion,
   type ChatCompletionMessage,
 } from "@/agent/llmClient";
-import { executeAgentTool } from "@/agent/tools";
+import { agentToolDefinitions, executeAgentTool } from "@/agent/tools";
 import { getImageDetail } from "@/api/images";
 import { hasLlmConfig } from "@/config/env";
 import { retrieveKnowledgeContext } from "@/knowledge";
@@ -319,6 +319,134 @@ const getToolPlan = (intent: AgentIntent): AgentToolName[] => {
   return ["get_image_detail", "classify_mineral", "segment_oooids"];
 };
 
+const MAX_AGENTIC_ITERATIONS = 5;
+
+const runAgenticLoop = async ({
+  question,
+  history,
+  imageId,
+  snapshot,
+  systemMessages,
+  onPartialReply,
+  onToolCalls,
+  onEvent,
+}: {
+  question: string;
+  history: AgentMessage[];
+  imageId: number;
+  snapshot: ImageDetailResponse | null;
+  systemMessages: ChatCompletionMessage[];
+  onPartialReply?: (fullText: string) => void;
+  onToolCalls?: (toolCalls: AgentToolCall[]) => void;
+  onEvent?: (event: AgentProgressEvent) => void;
+}): Promise<{ reply: string; toolCalls: AgentToolCall[] } | null> => {
+  const imageUrl = snapshot?.image?.origin_url;
+  const resolvedUrl = imageUrl ? resolveAssetUrl(imageUrl) : null;
+
+  const userContent: MessageContent = resolvedUrl
+    ? [
+        { type: "text" as const, text: question },
+        { type: "image_url" as const, image_url: { url: resolvedUrl } },
+      ]
+    : question;
+
+  const messages: ChatCompletionMessage[] = [
+    ...systemMessages,
+    ...sanitizeHistory(history).map((item) => ({
+      role: item.role,
+      content: item.content,
+    })),
+    { role: "user", content: userContent },
+  ];
+
+  const allToolCalls: AgentToolCall[] = [];
+
+  for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
+    const result = await streamChatCompletion({
+      messages,
+      tools: agentToolDefinitions,
+      temperature: 0.3,
+      onChunk: (_, fullText) => {
+        onPartialReply?.(fullText);
+      },
+    });
+
+    // LLM returned text only (no tool calls) — this is the final answer
+    if (result.toolCalls.length === 0) {
+      return { reply: result.text, toolCalls: allToolCalls };
+    }
+
+    // LLM wants to call tools
+    emitProgress(onEvent, {
+      stage: "tool",
+      message: `Agent 自主决定调用 ${result.toolCalls.length} 个工具（第 ${iteration + 1} 轮推理）。`,
+    });
+
+    // Append assistant message with tool_calls to conversation
+    messages.push({
+      role: "assistant",
+      content: result.text || "",
+      tool_calls: result.toolCalls,
+    });
+
+    // Execute each tool call
+    for (const tc of result.toolCalls) {
+      const toolName = tc.function.name as AgentToolName;
+      let args: Record<string, unknown> = {};
+
+      try {
+        args = JSON.parse(tc.function.arguments);
+      } catch {
+        // If arguments aren't valid JSON, try using them as-is
+        args = {};
+      }
+
+      // Ensure image_id is available for image tools
+      if (["get_image_detail", "classify_mineral", "segment_oooids"].includes(toolName)) {
+        args.image_id = args.image_id ?? imageId;
+      }
+
+      emitProgress(onEvent, {
+        stage: "tool",
+        message: `正在调用工具：${TOOL_LABELS[toolName] ?? toolName}（${toolName}）。`,
+      });
+
+      const toolOutput = await executeAgentTool(toolName, args, { imageId });
+
+      allToolCalls.push(toolOutput.trace);
+      onToolCalls?.([...allToolCalls]);
+
+      emitProgress(onEvent, {
+        stage: toolOutput.trace.status === "success" ? "tool" : "error",
+        message:
+          toolOutput.trace.status === "success"
+            ? `${TOOL_LABELS[toolName] ?? toolName}已返回：${toolOutput.trace.resultSummary}`
+            : `${TOOL_LABELS[toolName] ?? toolName}调用失败：${toolOutput.trace.errorMessage || toolOutput.trace.resultSummary}`,
+      });
+
+      // Append tool result as a tool-role message
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify(toolOutput.payload),
+      });
+    }
+
+    // Continue loop — LLM will see tool results and either call more tools or give final answer
+  }
+
+  // If we exhausted all iterations, do one final call without tools
+  const finalResult = await streamChatCompletion({
+    messages,
+    temperature: 0.3,
+    onChunk: (_, fullText) => {
+      onPartialReply?.(fullText);
+    },
+  });
+
+  return { reply: finalResult.text, toolCalls: allToolCalls };
+};
+
 const streamGeneralChat = async ({
   question,
   history,
@@ -409,7 +537,7 @@ const streamGeneralChat = async ({
     },
   ];
 
-  const reply = await streamChatCompletion({
+  const { text: reply } = await streamChatCompletion({
     messages,
     temperature: 0.5,
     onChunk: (_, fullText) => {
@@ -497,7 +625,7 @@ const streamImageSummary = async ({
     },
   ];
 
-  const reply = await streamChatCompletion({
+  const { text: reply } = await streamChatCompletion({
     messages,
     temperature: 0.3,
     onChunk: (_, fullText) => {
@@ -651,123 +779,239 @@ export const streamAgentTurn = async ({
   }
 
   const intent = inferAgentIntent(question);
-  const toolPlan = getToolPlan(intent);
-  const toolCalls: AgentToolCall[] = [];
+  let toolCalls: AgentToolCall[] = [];
+  let reply: string;
+  let snapshot: ImageDetailResponse | null = null;
 
-  emitProgress(onEvent, {
-    stage: "mode",
-    message: `已进入图像分析模式，计划调用 ${toolPlan
-      .map((toolName) => TOOL_LABELS[toolName])
-      .join("、")}。`,
-  });
-
-  for (const toolName of toolPlan) {
+  if (hasLlmConfig()) {
+    // === Agentic mode: let LLM decide which tools to call ===
     emitProgress(onEvent, {
-      stage: "tool",
-      message: `正在调用工具：${TOOL_LABELS[toolName]}（${toolName}）。`,
+      stage: "mode",
+      message: "已进入图像分析模式，Agent 将自主决定调用哪些工具。",
     });
 
-    const toolOutput = await executeAgentTool(
-      toolName,
-      { image_id: imageId },
-      { imageId },
-    );
+    const agenticSystemMessages: ChatCompletionMessage[] = [
+      {
+        role: "system",
+        content: `你是"岩石薄片智能分析助手"，具备岩石薄片图像的视觉分析能力。
 
-    toolCalls.push(toolOutput.trace);
-    onToolCalls?.([...toolCalls]);
+你有以下工具可用：
+1. get_image_detail — 获取图片基础信息及已有分类/分割结果
+2. classify_mineral — 调用矿物分类接口
+3. segment_oooids — 调用鲕粒分割接口
+4. search_knowledge — 搜索岩石矿物专业知识库
 
-    emitProgress(onEvent, {
-      stage: toolOutput.trace.status === "success" ? "tool" : "error",
-      message:
-        toolOutput.trace.status === "success"
-          ? `${TOOL_LABELS[toolName]}已返回：${toolOutput.trace.resultSummary}`
-          : `${TOOL_LABELS[toolName]}调用失败：${
-              toolOutput.trace.errorMessage || toolOutput.trace.resultSummary
-            }`,
-    });
-  }
+分析策略：
+- 如果用户要求分析图片，先调用 get_image_detail 查看当前状态，再根据需要调用分类或分割工具
+- 如果用户只问分类，只需 get_image_detail + classify_mineral
+- 如果用户只问分割，只需 get_image_detail + segment_oooids
+- 如果用户问知识性问题（矿物属性、岩石分类等），使用 search_knowledge
+- 不要调用不必要的工具
 
-  emitProgress(onEvent, {
-    stage: "summary",
-    message: "工具调用完成，正在同步最新结构化结果。",
-  });
-
-  const snapshot = await safeGetSnapshot(imageId);
-  onSnapshot?.(snapshot);
-
-  emitProgress(onEvent, {
-    stage: "summary",
-    message: hasLlmConfig()
-      ? "结构化结果已更新，正在整理最终报告。"
-      : "未配置大模型总结，正在使用前端模板生成报告。",
-  });
-
-  try {
-    const reply = await streamImageSummary({
-      imageId,
-      question,
-      snapshot,
-      toolCalls,
-      onPartialReply,
-    });
-
-    // Save image memory after successful analysis
-    if (snapshot && toolCalls.length > 0) {
-      saveImageMemory({
-        imageId,
-        fileName: snapshot.image.file_name,
-        classification: snapshot.classification,
-        segmentation: snapshot.segmentation,
-        lastSummary: reply.slice(0, 500),
-        timestamp: Date.now(),
-      });
-    }
-
-    // Check if conversation should be summarized
-    const scope = String(imageId);
-    const allMessages = [
-      ...conversationalHistory,
-      { role: "user" as const, content: question, id: "", createdAt: "" },
-      { role: "assistant" as const, content: reply, id: "", createdAt: "" },
+输出要求：
+1. 使用中文，Markdown 格式
+2. 如果调用了图像工具，生成包含以下小节的报告：## 任务结论、## 图片概况、## 矿物分类结果、## 鲕粒分割结果、## 综合分析与建议
+3. 每个小节至少 2 条要点
+4. 如果工具调用失败或没有结果，明确说明原因`,
+      },
     ];
-    if (shouldSummarize(allMessages)) {
-      try {
-        const summaryPrompt = buildSummarizationPrompt(allMessages);
-        const summaryReply = await streamChatCompletion({
-          messages: [
-            { role: "user", content: summaryPrompt },
-          ],
-          temperature: 0.3,
+
+    // Inject conversation memory
+    if (imageId) {
+      const scope = String(imageId);
+      const summary = getConversationSummary(scope);
+      if (summary) {
+        agenticSystemMessages.push({
+          role: "system",
+          content: `[历史对话摘要]\n${summary}`,
         });
-        if (summaryReply.trim()) {
-          saveConversationSummary(scope, summaryReply.trim());
-        }
-      } catch {
-        // Summary generation is best-effort
+      }
+
+      const imageMemory = getImageMemory(imageId);
+      if (imageMemory) {
+        agenticSystemMessages.push({
+          role: "system",
+          content: `[历史分析记录]\n${buildImageMemoryContext(imageMemory)}`,
+        });
       }
     }
 
-    return {
-      reply,
-      toolCalls,
-      snapshot,
-    };
-  } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : "模型总结失败。";
-    const fallback = buildTemplateReply(question, snapshot, intent);
-    const reply = `模型总结失败：${errorMessage}\n\n已基于当前接口结果返回前端兜底报告：\n\n${fallback}`;
+    // Inject knowledge context
+    const knowledgeContext = retrieveKnowledgeContext(question, 3);
+    if (knowledgeContext) {
+      agenticSystemMessages.push({
+        role: "system",
+        content: `[专业知识参考]\n以下是与分析任务相关的专业知识，请在回答时参考：\n\n${knowledgeContext}`,
+      });
+    }
 
+    try {
+      const agenticResult = await runAgenticLoop({
+        question,
+        history: conversationalHistory,
+        imageId,
+        snapshot: existingSnapshot,
+        systemMessages: agenticSystemMessages,
+        onPartialReply,
+        onToolCalls,
+        onEvent,
+      });
+
+      if (agenticResult) {
+        reply = agenticResult.reply;
+        toolCalls = agenticResult.toolCalls;
+        snapshot = await safeGetSnapshot(imageId);
+        onSnapshot?.(snapshot);
+      } else {
+        // LLM didn't return tool_calls — degrade to keyword intent
+        throw new Error("LLM 未返回 tool_calls，降级到关键词意图模式。");
+      }
+    } catch {
+      // === Fallback: keyword-based intent + hardcoded tool plan ===
+      emitProgress(onEvent, {
+        stage: "mode",
+        message: "Agent 降级到关键词意图模式，按预设计划调用工具。",
+      });
+
+      const toolPlan = getToolPlan(intent);
+      toolCalls = [];
+
+      emitProgress(onEvent, {
+        stage: "mode",
+        message: `计划调用 ${toolPlan.map((t) => TOOL_LABELS[t]).join("、")}。`,
+      });
+
+      for (const toolName of toolPlan) {
+        emitProgress(onEvent, {
+          stage: "tool",
+          message: `正在调用工具：${TOOL_LABELS[toolName]}（${toolName}）。`,
+        });
+
+        const toolOutput = await executeAgentTool(
+          toolName,
+          { image_id: imageId },
+          { imageId },
+        );
+
+        toolCalls.push(toolOutput.trace);
+        onToolCalls?.([...toolCalls]);
+
+        emitProgress(onEvent, {
+          stage: toolOutput.trace.status === "success" ? "tool" : "error",
+          message:
+            toolOutput.trace.status === "success"
+              ? `${TOOL_LABELS[toolName]}已返回：${toolOutput.trace.resultSummary}`
+              : `${TOOL_LABELS[toolName]}调用失败：${toolOutput.trace.errorMessage || toolOutput.trace.resultSummary}`,
+        });
+      }
+
+      snapshot = await safeGetSnapshot(imageId);
+      onSnapshot?.(snapshot);
+
+      emitProgress(onEvent, {
+        stage: "summary",
+        message: "工具调用完成，正在生成分析报告。",
+      });
+
+      try {
+        reply = await streamImageSummary({
+          imageId,
+          question,
+          snapshot,
+          toolCalls,
+          onPartialReply,
+        });
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "模型总结失败。";
+        const fallback = buildTemplateReply(question, snapshot, intent);
+        reply = `模型总结失败：${errorMessage}\n\n已基于当前接口结果返回前端兜底报告：\n\n${fallback}`;
+
+        emitProgress(onEvent, {
+          stage: "error",
+          message: `模型总结失败，改为返回前端兜底报告：${errorMessage}`,
+        });
+        onPartialReply?.(reply);
+      }
+    }
+  } else {
+    // === No LLM configured: keyword intent + template reply ===
     emitProgress(onEvent, {
-      stage: "error",
-      message: `模型总结失败，改为返回前端兜底报告：${errorMessage}`,
+      stage: "mode",
+      message: "未配置大模型接口，使用关键词意图分析 + 模板报告。",
     });
-    onPartialReply?.(reply);
 
-    return {
-      reply,
-      toolCalls,
-      snapshot,
-    };
+    const toolPlan = getToolPlan(intent);
+
+    for (const toolName of toolPlan) {
+      emitProgress(onEvent, {
+        stage: "tool",
+        message: `正在调用工具：${TOOL_LABELS[toolName]}（${toolName}）。`,
+      });
+
+      const toolOutput = await executeAgentTool(
+        toolName,
+        { image_id: imageId },
+        { imageId },
+      );
+
+      toolCalls.push(toolOutput.trace);
+      onToolCalls?.([...toolCalls]);
+
+      emitProgress(onEvent, {
+        stage: toolOutput.trace.status === "success" ? "tool" : "error",
+        message:
+          toolOutput.trace.status === "success"
+            ? `${TOOL_LABELS[toolName]}已返回：${toolOutput.trace.resultSummary}`
+            : `${TOOL_LABELS[toolName]}调用失败：${toolOutput.trace.errorMessage || toolOutput.trace.resultSummary}`,
+      });
+    }
+
+    snapshot = await safeGetSnapshot(imageId);
+    onSnapshot?.(snapshot);
+    reply = buildTemplateReply(question, snapshot, intent);
+    onPartialReply?.(reply);
   }
+
+  // Save image memory after successful analysis
+  if (snapshot && toolCalls.length > 0) {
+    saveImageMemory({
+      imageId,
+      fileName: snapshot.image.file_name,
+      classification: snapshot.classification,
+      segmentation: snapshot.segmentation,
+      lastSummary: reply.slice(0, 500),
+      timestamp: Date.now(),
+    });
+  }
+
+  // Check if conversation should be summarized
+  const scope = String(imageId);
+  const allMessages = [
+    ...conversationalHistory,
+    { role: "user" as const, content: question, id: "", createdAt: "" },
+    { role: "assistant" as const, content: reply, id: "", createdAt: "" },
+  ];
+  if (shouldSummarize(allMessages)) {
+    try {
+      const summaryPrompt = buildSummarizationPrompt(allMessages);
+      const { text: summaryReply } = await streamChatCompletion({
+        messages: [
+          { role: "user", content: summaryPrompt },
+        ],
+        temperature: 0.3,
+      });
+      if (summaryReply.trim()) {
+        saveConversationSummary(scope, summaryReply.trim());
+      }
+    } catch {
+      // Summary generation is best-effort
+    }
+  }
+
+  return {
+    reply,
+    toolCalls,
+    snapshot,
+  };
 };

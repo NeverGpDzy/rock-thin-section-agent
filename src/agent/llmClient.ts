@@ -18,6 +18,11 @@ export interface ChatCompletionMessage {
   tool_calls?: ChatCompletionToolCall[];
 }
 
+export interface StreamResult {
+  text: string;
+  toolCalls: ChatCompletionToolCall[];
+}
+
 export interface ChatCompletionTool {
   type: "function";
   function: {
@@ -176,7 +181,7 @@ export const streamChatCompletion = async ({
   temperature?: number;
   onChunk?: (chunk: string, fullText: string) => void;
   signal?: AbortSignal;
-}): Promise<string> => {
+}): Promise<StreamResult> => {
   const config = ensureLlmConfig();
   const candidates = getEndpointCandidates(config.llmBaseUrl);
   let lastError = "模型接口请求失败。";
@@ -226,17 +231,18 @@ export const streamChatCompletion = async ({
 const streamFromJson = async (
   response: Response,
   onChunk?: (chunk: string, fullText: string) => void,
-) => {
+): Promise<StreamResult> => {
   const body = (await response.json()) as ChatCompletionResponse;
   const content = body.choices?.[0]?.message?.content ?? "";
+  const toolCalls = body.choices?.[0]?.message?.tool_calls ?? [];
   onChunk?.(content, content);
-  return content;
+  return { text: content, toolCalls };
 };
 
 const streamFromSSE = async (
   response: Response,
   onChunk?: (chunk: string, fullText: string) => void,
-) => {
+): Promise<StreamResult> => {
   const reader = response.body?.getReader();
 
   if (!reader) {
@@ -246,6 +252,18 @@ const streamFromSSE = async (
   const decoder = new TextDecoder();
   let buffer = "";
   let fullText = "";
+
+  // Accumulate tool calls by index — SSE delivers name/arguments incrementally
+  const toolCallAccumulator: Map<
+    number,
+    { id: string; name: string; arguments: string }
+  > = new Map();
+
+  interface SSEToolCallDelta {
+    index: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  }
 
   const processLine = (line: string) => {
     const trimmed = line.trim();
@@ -266,18 +284,57 @@ const streamFromSSE = async (
           delta?: {
             content?: string | null;
             reasoning_content?: string | null;
+            tool_calls?: SSEToolCallDelta[];
           };
-          message?: { content?: string | null };
+          message?: {
+            content?: string | null;
+            tool_calls?: ChatCompletionToolCall[];
+          };
         }>;
       };
-      const delta =
-        parsed.choices?.[0]?.delta?.content ??
-        parsed.choices?.[0]?.delta?.reasoning_content ??
-        parsed.choices?.[0]?.message?.content;
 
-      if (delta) {
-        fullText += delta;
-        onChunk?.(delta, fullText);
+      const choice = parsed.choices?.[0];
+
+      // Text content (streaming delta or non-streaming message)
+      const textDelta =
+        choice?.delta?.content ??
+        choice?.delta?.reasoning_content ??
+        choice?.message?.content;
+
+      if (textDelta) {
+        fullText += textDelta;
+        onChunk?.(textDelta, fullText);
+      }
+
+      // Tool calls from streaming delta
+      const deltaToolCalls = choice?.delta?.tool_calls;
+      if (deltaToolCalls) {
+        for (const tc of deltaToolCalls) {
+          const existing = toolCallAccumulator.get(tc.index);
+          if (existing) {
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name = tc.function.name;
+            if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+          } else {
+            toolCallAccumulator.set(tc.index, {
+              id: tc.id ?? `call_${tc.index}`,
+              name: tc.function?.name ?? "",
+              arguments: tc.function?.arguments ?? "",
+            });
+          }
+        }
+      }
+
+      // Tool calls from non-streaming message (JSON response)
+      const messageToolCalls = choice?.message?.tool_calls;
+      if (messageToolCalls) {
+        for (const tc of messageToolCalls) {
+          toolCallAccumulator.set(tc.id ? toolCallAccumulator.size : 0, {
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          });
+        }
       }
     } catch {
       // skip malformed SSE chunks
@@ -309,5 +366,19 @@ const streamFromSSE = async (
     }
   }
 
-  return fullText;
+  const toolCalls: ChatCompletionToolCall[] = [];
+  for (const [, acc] of toolCallAccumulator) {
+    if (acc.name) {
+      toolCalls.push({
+        id: acc.id,
+        type: "function",
+        function: {
+          name: acc.name,
+          arguments: acc.arguments,
+        },
+      });
+    }
+  }
+
+  return { text: fullText, toolCalls };
 };
