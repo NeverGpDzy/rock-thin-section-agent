@@ -32,6 +32,7 @@ const GENERAL_CHAT_PROMPT = `
 你是"岩石薄片智能分析助手"。
 即使当前没有绑定图片，你也可以正常进行中文对话、解释系统能力、回答一般性问题。
 只有当用户明确要分析某张图片、识别矿物或进行鲕粒分割时，才需要要求用户上传或选择图片。
+如果用户提供了图片，请仔细观察图片内容，描述你看到的岩石薄片特征（颜色、纹理、颗粒形态、矿物分布等）。
 
 回复要求：
 1. 使用中文。
@@ -40,20 +41,27 @@ const GENERAL_CHAT_PROMPT = `
 4. 不要编造图片分析结果；没有数据时要明确说明缺失。`.trim();
 
 const SUMMARY_PROMPT = `
-你是"岩石薄片智能分析助手"。
-请只基于提供的结构化数据生成中文 Markdown 小报告，不要虚构没有返回的图像结论。
+你是"岩石薄片智能分析助手"，具备岩石薄片图像的视觉分析能力。
+
+分析流程：
+1. 如果提供了图片，先仔细观察图片，描述你看到的内容：薄片整体形态、矿物颗粒的颜色与分布、
+   鲕粒的形状与大小、纹理特征、透射光/反射光下的表现等。
+2. 再结合后端接口返回的结构化数据（矿物分类、鲕粒分割），给出综合分析。
+3. 如果图片和数据存在矛盾或值得注意的地方，主动指出。
 
 输出要求：
 1. 必须使用 Markdown。
 2. 必须包含以下二级标题：
    - ## 任务结论
    - ## 图片概况
+   - ## 视觉描述（如果提供了图片）
    - ## 矿物分类结果
    - ## 鲕粒分割结果
-   - ## 建议与限制
-3. 每个小节至少写 2 条要点，整体不要过短，尽量形成一份简短但完整的小报告。
-4. 如果某项任务未完成、失败或没有结果，要明确写出当前状态、错误信息或缺失原因。
-5. 如果用户问题聚焦某一个子任务，报告重点放在该部分，但其它部分仍要给出状态说明。`.trim();
+   - ## 综合分析与建议
+3. 视觉描述部分要基于图片内容，描述你实际看到的特征，不要编造。
+4. 每个小节至少写 2 条要点，整体形成一份简短但完整的小报告。
+5. 如果某项任务未完成、失败或没有结果，要明确写出当前状态、错误信息或缺失原因。
+6. 如果用户问题聚焦某一个子任务，报告重点放在该部分，但其它部分仍要给出状态说明。`.trim();
 
 const GENERAL_CHAT_UNAVAILABLE_REPLY =
   "当前未配置大模型接口，普通聊天暂不可用。请先上传或选择图片后再进行图像分析，或补充 VITE_LLM_BASE_URL、VITE_LLM_API_KEY、VITE_LLM_MODEL 后再试。";
@@ -309,24 +317,6 @@ const getToolPlan = (intent: AgentIntent): AgentToolName[] => {
   return ["get_image_detail", "classify_mineral", "segment_oooids"];
 };
 
-const buildMultimodalContent = (
-  text: string,
-  imageUrl?: string | null,
-): MessageContent => {
-  if (!imageUrl) return text;
-
-  const resolvedUrl = resolveAssetUrl(imageUrl);
-  if (!resolvedUrl) return text;
-
-  // API 不支持 data URL，只传真实 HTTP 链接
-  if (resolvedUrl.startsWith("data:")) return text;
-
-  return [
-    { type: "text" as const, text },
-    { type: "image_url" as const, image_url: { url: resolvedUrl } },
-  ];
-};
-
 const streamGeneralChat = async ({
   question,
   history,
@@ -373,17 +363,22 @@ const streamGeneralChat = async ({
   }
 
   if (imageId && snapshot) {
-    const imageUrl = snapshot.image?.origin_url;
     systemMessages.push({
       role: "system",
-      content: buildMultimodalContent(
-        `当前会话绑定了图片 #${imageId}。如果用户提到当前图片，可以结合这些结构化信息回答：${JSON.stringify(
-          shrinkSnapshot(snapshot),
-        )}`,
-        imageUrl,
-      ),
+      content: `当前会话绑定了图片 #${imageId}（${snapshot.image?.file_name}）。以下是该图片的结构化信息：${JSON.stringify(shrinkSnapshot(snapshot))}`,
     });
   }
+
+  // 在用户消息中带上图片
+  const imageUrl = snapshot?.image?.origin_url;
+  const resolvedUrl = imageUrl ? resolveAssetUrl(imageUrl) : null;
+
+  const userContent: MessageContent = resolvedUrl
+    ? [
+        { type: "text" as const, text: question },
+        { type: "image_url" as const, image_url: { url: resolvedUrl } },
+      ]
+    : question;
 
   const messages: ChatCompletionMessage[] = [
     ...systemMessages,
@@ -393,7 +388,7 @@ const streamGeneralChat = async ({
     })),
     {
       role: "user",
-      content: question,
+      content: userContent,
     },
   ];
 
@@ -446,18 +441,35 @@ const streamImageSummary = async ({
   );
 
   const imageUrl = snapshot?.image?.origin_url;
+  const resolvedUrl = imageUrl ? resolveAssetUrl(imageUrl) : null;
+
+  // 把图片 + 分析指令 + 结构化数据合在一条用户消息里，确保模型同时看到图片和数据
+  const userContent: MessageContent = resolvedUrl
+    ? [
+        {
+          type: "text" as const,
+          text: `请先仔细观察这张岩石薄片图片，描述你看到的视觉特征（颜色、纹理、颗粒形态、矿物分布等），然后结合以下后端接口返回的结构化分析数据，生成综合分析报告。\n\n${summaryData}`,
+        },
+        {
+          type: "image_url" as const,
+          image_url: { url: resolvedUrl },
+        },
+      ]
+    : summaryData;
+
+  const messages: ChatCompletionMessage[] = [
+    {
+      role: "system",
+      content: SUMMARY_PROMPT,
+    },
+    {
+      role: "user",
+      content: userContent,
+    },
+  ];
 
   const reply = await streamChatCompletion({
-    messages: [
-      {
-        role: "system",
-        content: SUMMARY_PROMPT,
-      },
-      {
-        role: "user",
-        content: buildMultimodalContent(summaryData, imageUrl),
-      },
-    ],
+    messages,
     temperature: 0.3,
     onChunk: (_, fullText) => {
       onPartialReply?.(fullText);

@@ -85,7 +85,6 @@ const buildPayload = ({
     messages,
     temperature,
     stream,
-    thinking: { type: "disabled" },
   };
 
   if (tools && tools.length > 0) {

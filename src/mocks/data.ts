@@ -80,12 +80,18 @@ export const mockUsers: MockStoredUser[] = [
   },
 ];
 
+// 使用 Wikimedia Commons 真实岩石薄片图片，确保模型视觉能力可被调用
+const ROCK_IMG_A =
+  "https://upload.wikimedia.org/wikipedia/commons/e/ee/Thin_section_of_granite_in_cross-polarized_light.jpg";
+const ROCK_IMG_B =
+  "https://upload.wikimedia.org/wikipedia/commons/3/3f/Biotite-and-hornblende-bearing-granite-ppl.jpg";
+
 export const mockImages: ImageRecord[] = [
   {
     id: 1,
-    file_name: "sample_olivine.jpg",
-    origin_url: svgToDataUrl(createRockSvg("岩石薄片样例 A", "偏光下矿物纹理", "#d97b47")),
-    thumb_url: svgToDataUrl(createRockSvg("样例 A", "缩略图", "#d97b47")),
+    file_name: "granite_xpl.jpg",
+    origin_url: ROCK_IMG_A,
+    thumb_url: ROCK_IMG_A,
     width: 960,
     height: 720,
     file_size: 165000,
@@ -99,9 +105,9 @@ export const mockImages: ImageRecord[] = [
   },
   {
     id: 2,
-    file_name: "sample_ooid.jpg",
-    origin_url: svgToDataUrl(createRockSvg("岩石薄片样例 B", "鲕粒轮廓更明显", "#907a45")),
-    thumb_url: svgToDataUrl(createRockSvg("样例 B", "缩略图", "#907a45")),
+    file_name: "biotite_granite_ppl.jpg",
+    origin_url: ROCK_IMG_B,
+    thumb_url: ROCK_IMG_B,
     width: 960,
     height: 720,
     file_size: 188000,
