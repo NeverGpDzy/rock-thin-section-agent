@@ -48,9 +48,21 @@ export const extractErrorMessage = (error: unknown) => {
   }
 
   if (axios.isAxiosError(error)) {
-    const axiosError = error as AxiosError<ApiEnvelope<never>>;
+    const axiosError = error as AxiosError<ApiEnvelope<never> & { detail?: unknown }>;
+    const data = axiosError.response?.data;
+
+    // FastAPI HTTPException returns {"detail": "..."}
+    // FastAPI validation errors return {"detail": [{loc, msg, type}, ...]}
+    const detail = data?.detail;
+    if (typeof detail === "string") {
+      return detail;
+    }
+    if (Array.isArray(detail)) {
+      return detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join("；") || "请求参数有误。";
+    }
+
     return (
-      axiosError.response?.data?.message ||
+      (data as ApiEnvelope<never>)?.message ||
       axiosError.message ||
       "请求失败，请稍后重试。"
     );

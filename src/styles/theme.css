@@ -264,6 +264,15 @@ a {
   overflow: auto;
 }
 
+.agent-left > .panel-card:last-child {
+  flex: 1;
+  min-height: 0;
+}
+
+.agent-left > .panel-card:last-child .ant-card-body {
+  overflow: auto;
+}
+
 /* ── Image context card ────────────────── */
 
 .agent-context__select {
