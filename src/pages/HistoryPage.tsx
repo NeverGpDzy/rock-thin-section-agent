@@ -41,7 +41,7 @@ export const HistoryPage = () => {
 
   const memories = useMemo(() => loadAllImageMemories(), []);
 
-  const columns = [
+  const columns = useMemo(() => [
     {
       title: "图片名称",
       dataIndex: "fileName",
@@ -117,7 +117,7 @@ export const HistoryPage = () => {
         </Button>
       ),
     },
-  ];
+  ], [navigate]);
 
   const expandedRowRender = (record: ImageMemoryData) => {
     if (!record.lastSummary) return null;

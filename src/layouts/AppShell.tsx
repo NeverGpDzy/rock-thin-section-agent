@@ -7,6 +7,12 @@ import { Layout, Menu, Typography } from "antd";
 import { useMemo } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
+const PAGE_TITLES: Record<string, string> = {
+  "/agent": "Agent 分析助手",
+  "/knowledge": "岩石矿物知识库",
+  "/history": "分析历史",
+};
+
 const { Header, Content, Sider } = Layout;
 
 export const AppShell = () => {
@@ -77,7 +83,7 @@ export const AppShell = () => {
           <div className="app-shell__header-inner">
             <div>
               <Typography.Title level={3} className="app-shell__header-title" style={{ margin: 0 }}>
-                Agent 分析助手
+                {PAGE_TITLES[selectedKey] ?? "Agent 分析助手"}
               </Typography.Title>
             </div>
           </div>

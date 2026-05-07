@@ -23,5 +23,10 @@ export const StatusTag = ({
     return <Tag>未分析</Tag>;
   }
 
-  return <Tag color={STATUS_MAP[status].color}>{STATUS_MAP[status].label}</Tag>;
+  const mapped = STATUS_MAP[status];
+  if (!mapped) {
+    return <Tag>{status}</Tag>;
+  }
+
+  return <Tag color={mapped.color}>{mapped.label}</Tag>;
 };

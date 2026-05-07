@@ -5,6 +5,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_image_detail: "获取图片详情",
   classify_mineral: "调用矿物分类",
   segment_oooids: "调用鲕粒分割",
+  search_knowledge: "知识库检索",
 };
 
 export const AgentToolList = ({ toolCalls }: { toolCalls: AgentToolCall[] }) => {

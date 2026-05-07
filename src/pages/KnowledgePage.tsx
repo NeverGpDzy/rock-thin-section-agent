@@ -11,7 +11,6 @@ import {
 import { useMemo, useState } from "react";
 import {
   getAllKnowledgeEntries,
-  getKnowledgeByCategory,
   searchKnowledge,
   CATEGORY_LABELS,
 } from "@/knowledge";
@@ -41,13 +40,15 @@ export const KnowledgePage = () => {
   >("all");
 
   const filteredEntries = useMemo(() => {
-    if (searchQuery.trim()) {
-      return searchKnowledge(searchQuery, 30);
+    let entries = searchQuery.trim()
+      ? searchKnowledge(searchQuery, 50)
+      : getAllKnowledgeEntries();
+
+    if (selectedCategory !== "all") {
+      entries = entries.filter((e) => e.category === selectedCategory);
     }
-    if (selectedCategory === "all") {
-      return getAllKnowledgeEntries();
-    }
-    return getKnowledgeByCategory(selectedCategory);
+
+    return entries;
   }, [searchQuery, selectedCategory]);
 
   const collapseItems = useMemo(

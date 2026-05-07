@@ -304,7 +304,7 @@ a {
 }
 
 .image-preview img {
-  object-fit: cover;
+  object-fit: contain;
 }
 
 /* ── Chat card ─────────────────────────── */

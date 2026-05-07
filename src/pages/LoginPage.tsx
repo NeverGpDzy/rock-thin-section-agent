@@ -57,7 +57,7 @@ export const LoginPage = () => {
             name="username"
             rules={[{ required: true, message: "请输入用户名" }]}
           >
-            <Input placeholder="请输入用户名" size="large" />
+            <Input placeholder="请输入用户名" size="large" disabled={loginMutation.isPending} />
           </Form.Item>
 
           <Form.Item
@@ -65,7 +65,7 @@ export const LoginPage = () => {
             name="password"
             rules={[{ required: true, message: "请输入密码" }]}
           >
-            <Input.Password placeholder="请输入密码" size="large" />
+            <Input.Password placeholder="请输入密码" size="large" disabled={loginMutation.isPending} />
           </Form.Item>
 
           <Space direction="vertical" style={{ width: "100%" }}>
