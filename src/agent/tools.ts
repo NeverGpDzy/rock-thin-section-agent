@@ -4,6 +4,10 @@ import {
   getImageDetail,
 } from "@/api/images";
 import type { ChatCompletionTool } from "@/agent/llmClient";
+import {
+  ensureKnowledgeReady,
+  searchKnowledge,
+} from "@/knowledge";
 import type {
   AgentToolCall,
   AgentToolExecutionContext,
@@ -48,6 +52,25 @@ export const agentToolDefinitions: ChatCompletionTool[] = [
       parameters: imageIdParameters,
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "search_knowledge",
+      description:
+        "搜索岩石矿物专业知识库，获取与查询相关的专业知识条目。当用户询问专业概念、矿物属性、岩石分类等知识性问题时使用。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "搜索关键词或问题",
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const resolveImageId = (
@@ -89,6 +112,21 @@ const errorTrace = (
   errorMessage,
 });
 
+const genericTrace = (
+  name: AgentToolName,
+  args: Record<string, unknown>,
+  status: "success" | "error",
+  resultSummary: string,
+  errorMessage?: string,
+): AgentToolCall => ({
+  id: crypto.randomUUID(),
+  name,
+  args,
+  status,
+  resultSummary,
+  errorMessage,
+});
+
 export const executeAgentTool = async (
   name: AgentToolName,
   args: Record<string, unknown>,
@@ -98,6 +136,24 @@ export const executeAgentTool = async (
   trace: AgentToolCall;
 }> => {
   try {
+    if (name === "search_knowledge") {
+      const query = String(args.query || "");
+      ensureKnowledgeReady();
+      const entries = searchKnowledge(query, 5);
+
+      return {
+        payload: {
+          results: entries.map((e) => ({ title: e.title, content: e.content })),
+        },
+        trace: genericTrace(
+          name,
+          args,
+          "success",
+          `知识库搜索 "${query}" 返回 ${entries.length} 条结果。`,
+        ),
+      };
+    }
+
     const imageId = resolveImageId(args, context);
 
     if (name === "get_image_detail") {

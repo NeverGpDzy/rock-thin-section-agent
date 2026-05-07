@@ -10,7 +10,8 @@ export type AgentMessageKind = "message" | "status";
 export type AgentToolName =
   | "get_image_detail"
   | "classify_mineral"
-  | "segment_oooids";
+  | "segment_oooids"
+  | "search_knowledge";
 
 export interface AgentToolCall {
   id: string;

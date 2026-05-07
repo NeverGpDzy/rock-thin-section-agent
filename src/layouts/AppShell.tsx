@@ -1,4 +1,8 @@
-import { ExperimentOutlined } from "@ant-design/icons";
+import {
+  BookOutlined,
+  ClockCircleOutlined,
+  ExperimentOutlined,
+} from "@ant-design/icons";
 import { Layout, Menu, Typography } from "antd";
 import { useMemo } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
@@ -9,8 +13,11 @@ export const AppShell = () => {
   const location = useLocation();
 
   const selectedKey = useMemo(() => {
-    if (location.pathname.startsWith("/agent")) {
-      return "/agent";
+    if (location.pathname.startsWith("/knowledge")) {
+      return "/knowledge";
+    }
+    if (location.pathname.startsWith("/history")) {
+      return "/history";
     }
     return "/agent";
   }, [location.pathname]);
@@ -21,6 +28,16 @@ export const AppShell = () => {
         key: "/agent",
         icon: <ExperimentOutlined />,
         label: <Link to="/agent">Agent 分析</Link>,
+      },
+      {
+        key: "/knowledge",
+        icon: <BookOutlined />,
+        label: <Link to="/knowledge">知识库</Link>,
+      },
+      {
+        key: "/history",
+        icon: <ClockCircleOutlined />,
+        label: <Link to="/history">分析历史</Link>,
       },
     ],
     [],

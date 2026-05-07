@@ -1,6 +1,8 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/layouts/AppShell";
 import { AgentPage } from "@/pages/AgentPage";
+import { HistoryPage } from "@/pages/HistoryPage";
+import { KnowledgePage } from "@/pages/KnowledgePage";
 import { LoginPage } from "@/pages/LoginPage";
 import { useAuthStore } from "@/store/authStore";
 
@@ -40,6 +42,8 @@ const App = () => (
     >
       <Route index element={<AgentPage />} />
       <Route path="agent" element={<AgentPage />} />
+      <Route path="knowledge" element={<KnowledgePage />} />
+      <Route path="history" element={<HistoryPage />} />
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes>

@@ -6,6 +6,7 @@ import {
 import { executeAgentTool } from "@/agent/tools";
 import { getImageDetail } from "@/api/images";
 import { hasLlmConfig } from "@/config/env";
+import { retrieveKnowledgeContext } from "@/knowledge";
 import {
   getConversationSummary,
   shouldSummarize,
@@ -100,6 +101,7 @@ const TOOL_LABELS: Record<AgentToolName, string> = {
   get_image_detail: "读取图像详情",
   classify_mineral: "矿物分类",
   segment_oooids: "鲕粒分割",
+  search_knowledge: "知识库检索",
 };
 
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -323,12 +325,14 @@ const streamGeneralChat = async ({
   imageId,
   snapshot,
   onPartialReply,
+  onEvent,
 }: {
   question: string;
   history: AgentMessage[];
   imageId?: number | null;
   snapshot?: ImageDetailResponse | null;
   onPartialReply?: (fullText: string) => void;
+  onEvent?: (event: AgentProgressEvent) => void;
 }) => {
   if (!hasLlmConfig()) {
     throw new Error("当前未配置大模型接口，无法进行普通聊天。");
@@ -366,6 +370,19 @@ const streamGeneralChat = async ({
     systemMessages.push({
       role: "system",
       content: `当前会话绑定了图片 #${imageId}（${snapshot.image?.file_name}）。以下是该图片的结构化信息：${JSON.stringify(shrinkSnapshot(snapshot))}`,
+    });
+  }
+
+  // Inject knowledge context from the knowledge base
+  const knowledgeContext = retrieveKnowledgeContext(question, 3);
+  if (knowledgeContext) {
+    emitProgress(onEvent, {
+      stage: "tool",
+      message: "已从知识库检索到相关专业知识，正在注入上下文。",
+    });
+    systemMessages.push({
+      role: "system",
+      content: `[专业知识参考]\n以下是与用户问题相关的专业知识条目，请参考这些内容回答，但不要逐字复制。如果用户问题与这些知识无关，可以忽略。\n\n${knowledgeContext}`,
     });
   }
 
@@ -457,11 +474,23 @@ const streamImageSummary = async ({
       ]
     : summaryData;
 
-  const messages: ChatCompletionMessage[] = [
+  const systemMessages: ChatCompletionMessage[] = [
     {
       role: "system",
       content: SUMMARY_PROMPT,
     },
+  ];
+
+  const knowledgeContext = retrieveKnowledgeContext(question, 3);
+  if (knowledgeContext) {
+    systemMessages.push({
+      role: "system",
+      content: `[专业知识参考]\n以下是与分析任务相关的专业知识，请在生成报告时参考：\n\n${knowledgeContext}`,
+    });
+  }
+
+  const messages: ChatCompletionMessage[] = [
+    ...systemMessages,
     {
       role: "user",
       content: userContent,
@@ -563,6 +592,7 @@ export const streamAgentTurn = async ({
       question,
       history: conversationalHistory,
       onPartialReply,
+      onEvent,
     });
 
     return {
@@ -610,6 +640,7 @@ export const streamAgentTurn = async ({
       imageId,
       snapshot: existingSnapshot,
       onPartialReply,
+      onEvent,
     });
 
     return {
